@@ -1,8 +1,8 @@
-import { TextDocument, Uri } from "vscode";
+import { TextDocument, Uri, workspace } from "vscode";
 import { basename, extname } from "path";
 import * as fs from "fs";
 import { SceneNode, Scene } from "./types";
-import { createLogger } from "../utils";
+import { convert_resource_path_to_uri, createLogger } from "../utils";
 
 const log = createLogger("scenes.parser");
 
@@ -18,7 +18,7 @@ export class SceneParser {
 		SceneParser.instance = this;
 	}
 
-	public parse_scene(document: TextDocument) {
+	public async parse_scene(document: TextDocument) {
 		const path = document.uri.fsPath;
 		const stats = fs.statSync(path);
 
@@ -88,9 +88,16 @@ export class SceneParser {
 		for (const match of text.matchAll(nodeRegex)) {
 			const line = match[0];
 			const name = line.match(/name="([\w]+)"/)?.[1];
-			const type = line.match(/type="([\w]+)"/)?.[1] ?? "PackedScene";
+			var type = line.match(/type="([\w]+)"/)?.[1] ?? "PackedScene";
 			let parent = line.match(/parent="([\w\/.]+)"/)?.[1];
 			const instance = line.match(/instance=ExtResource\(\s*"?([\w]+)"?\s*\)/)?.[1];
+
+			// type from script
+			var codeType = await GetCodeTypeFromScript(text, line, scene);
+
+			if (codeType) {
+				type = codeType;
+			}
 
 			// leaving this in case we have a reason to use these node paths in the future
 			// const rawNodePaths = line.match(/node_paths=PackedStringArray\(([\w",\s]*)\)/)?.[1];
@@ -139,6 +146,14 @@ export class SceneParser {
 					node.resourcePath = scene.externalResources[instance].path;
 					if ([".tscn"].includes(extname(node.resourcePath))) {
 						node.contextValue += "openable";
+
+						// get code type
+						const uri = await convert_resource_path_to_uri(node.resourcePath);
+						const doc = await workspace.openTextDocument(uri);
+						const scene = await this.parse_scene(doc);
+
+						node.className = scene.nodes.entries().next().value[1].className;
+						node.description = node.className;
 					}
 				}
 				node.contextValue += "hasResourcePath";
@@ -169,3 +184,35 @@ export class SceneParser {
 		return scene;
 	}
 }
+
+async function GetCodeTypeFromScript(text: string, line: string, scene: Scene) {
+	var lines = text.split("\n");
+	var collectionMode = false;
+	var retval = null;
+
+	// find the correct line
+	for (var x = 0; x < lines.length; x++) {
+		var element = lines[x];
+		if (element === line && !collectionMode) {
+			collectionMode = true;
+		}
+
+		if (element === "") {
+			collectionMode = false;
+		}
+
+		if (collectionMode && element.startsWith("script = ")) {
+			var id = element.match(/script = ExtResource\("([\w.:/]+)"/)?.[1];
+			const uri = await convert_resource_path_to_uri(scene.externalResources[id].path);
+			var contents = fs.readFileSync(uri.fsPath, "utf-8");
+			var scriptType = contents.match(/class_name.([\w]+)/)?.[1];
+			if (scriptType) {
+				retval = scriptType;
+			}
+			collectionMode = false;
+		}
+	}
+
+	return retval;
+}
+
